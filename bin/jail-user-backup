@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# jail-user-backup — snapshot and export/import operations for one jail.
+#
+# Snapshots are instant, on-pool (CoW) and ideal for quick rollback;
+# exports are portable tarballs written to BACKUP_DIR on the host, and
+# survive the loss of the storage pool. 'import' can also resurrect a
+# fully deprovisioned user: the password comes back with the jail (it
+# lives in the jail's /etc/shadow), and the router-side hop key and
+# sshpiper pipe are recreated.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+Usage: jail-user-backup <username> snapshot [<name>]     create (default name: backup-<timestamp>)
+       jail-user-backup <username> list                  list snapshots
+       jail-user-backup <username> restore <name> [--yes]
+       jail-user-backup <username> delete <name>
+       jail-user-backup <username> export [<file>]       tarball (default: in ${BACKUP_DIR:-BACKUP_DIR})
+       jail-user-backup <username> import <file> [--yes] replace container from a tarball
+EOF
+    exit 1
+}
+
+username="${1:-}"
+action="${2:-}"
+[ -n "${username}" ] && [ -n "${action}" ] || usage
+arg="${3:-}"
+confirmed=false
+for a in "${@:3}"; do [ "${a}" = "--yes" ] || [ "${a}" = "-y" ] && confirmed=true; done
+[ "${arg}" = "--yes" ] || [ "${arg}" = "-y" ] && arg=""
+
+need_root
+validate_username "${username}"
+jail="${JAIL_PREFIX}${username}"
+
+confirm() { # <prompt>
+    ${confirmed} && return 0
+    read -r -p "$1 [y/N] " answer
+    [[ "${answer}" =~ ^[Yy] ]] || die "aborted"
+}
+
+case "${action}" in
+snapshot)
+    container_exists "${jail}" || die "no such jail: ${jail}"
+    name="${arg:-backup-$(date +%Y%m%d-%H%M%S)}"
+    validate_snapshot_name "${name}"
+    log "Creating snapshot '${name}' of ${jail}"
+    incus snapshot create "${jail}" "${name}"
+    ;;
+
+list)
+    container_exists "${jail}" || die "no such jail: ${jail}"
+    if [ "${arg}" = "--csv" ]; then
+        incus snapshot list "${jail}" -f csv
+    else
+        incus snapshot list "${jail}"
+    fi
+    ;;
+
+restore)
+    container_exists "${jail}" || die "no such jail: ${jail}"
+    [ -n "${arg}" ] || usage
+    validate_snapshot_name "${arg}"
+    confirm "Restore ${jail} to snapshot '${arg}'? Changes made since then are LOST."
+    log "Restoring ${jail} from snapshot '${arg}'"
+    incus snapshot restore "${jail}" "${arg}"
+    incus start "${jail}" 2>/dev/null || true
+    wait_for_container "${jail}"
+    log "Restore complete"
+    ;;
+
+delete)
+    container_exists "${jail}" || die "no such jail: ${jail}"
+    [ -n "${arg}" ] || usage
+    validate_snapshot_name "${arg}"
+    incus snapshot delete "${jail}" "${arg}"
+    log "Snapshot '${arg}' deleted"
+    ;;
+
+export)
+    container_exists "${jail}" || die "no such jail: ${jail}"
+    file="${arg}"
+    if [ -z "${file}" ]; then
+        install -d -m 700 "${BACKUP_DIR}"
+        file="${BACKUP_DIR}/${jail}-$(date +%Y%m%d-%H%M%S).tar.gz"
+    fi
+    log "Exporting ${jail} to ${file} (container only, no snapshots)"
+    incus export "${jail}" "${file}" --instance-only --compression gzip
+    log "Export complete: $(du -h "${file}" | cut -f1) ${file}"
+    ;;
+
+import)
+    file="${arg}"
+    [ -n "${file}" ] || usage
+    [ -r "${file}" ] || die "cannot read '${file}'"
+    container_exists "${ROUTER_NAME}" || die "router container '${ROUTER_NAME}' missing - run install.sh first"
+    # The tarball dictates the restored container's name; refuse mismatches
+    # so "import bob's tarball as alice" can't silently create jail-bob.
+    tar_name="$(tar -xzOf "${file}" backup/index.yaml 2>/dev/null | awk '$1 == "name:" {print $2; exit}')"
+    [ "${tar_name}" = "${jail}" ] || \
+        die "tarball contains '${tar_name:-unknown}', expected '${jail}'"
+    if container_exists "${jail}"; then
+        confirm "Container ${jail} exists. Replace it with the tarball contents? Current data is LOST."
+        log "Deleting current ${jail}"
+        incus delete -f "${jail}"
+    fi
+    log "Importing ${jail} from ${file}"
+    incus import "${file}"
+    # A freshly imported container can transiently refuse to start (device
+    # setup racing the daemon settling), so retry a few times.
+    # NOTE: on a 'dir' storage pool inside a nested/unprivileged container,
+    # remapping the imported rootfs to an isolated idmap fails ("Failed to
+    # change ACLs ...") - a host-kernel limitation, not a fault here; import
+    # works on real hosts with btrfs/lvm idmapped mounts.
+    started=false
+    for _ in 1 2 3 4 5; do
+        if incus info "${jail}" 2>/dev/null | grep -q 'Status: RUNNING' || incus start "${jail}" 2>/dev/null; then
+            started=true; break
+        fi
+        sleep 3
+    done
+    ${started} || die "imported container '${jail}' would not start - see: incus info --show-log ${jail}"
+    wait_for_container "${jail}"
+    if ! user_exists "${username}"; then
+        log "Router state for '${username}' is gone - recreating hop key (password is restored with the jail)"
+        install_hop_key "${username}" "${jail}"
+    fi
+    log "Re-pinning jail host key and regenerating the pipe"
+    pin_jail_hostkey "${username}" "${jail}"
+    regen_pipe "${username}"
+    log "Import complete - '${username}' can log in again"
+    ;;
+
+*) usage ;;
+esac

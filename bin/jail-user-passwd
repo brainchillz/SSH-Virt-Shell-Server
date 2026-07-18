@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# jail-user-passwd — set or reset a jail user's login password.
+#
+# The password lives INSIDE the user's jail (sshpiper forwards the login
+# password to the jail's sshd for validation), so this simply runs
+# chpasswd there. Users can also change their own with plain 'passwd'.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() { echo "Usage: jail-user-passwd <username> [--password <password>]" >&2; exit 1; }
+
+username="${1:-}"
+[ -n "${username}" ] || usage
+shift
+password=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --password) password="${2:?--password needs a value}"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+need_root
+validate_username "${username}"
+jail="${JAIL_PREFIX}${username}"
+container_exists "${jail}" || die "no such jail: ${jail}"
+incus exec "${jail}" -- id -u "${username}" >/dev/null 2>&1 || die "no such user in ${jail}: ${username}"
+
+[ -n "${password}" ] || password="$(gen_password)"
+printf '%s:%s\n' "${username}" "${password}" | incus exec "${jail}" -- chpasswd
+
+log "Password updated for '${username}'"
+echo "  New password: ${password}"

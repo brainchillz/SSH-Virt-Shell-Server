@@ -1,0 +1,79 @@
+#!/bin/bash
+#
+# jail-user-limits — show or override one jail's resource limits.
+#
+# The ssh-jail profile carries the defaults (JAIL_CPU/JAIL_MEMORY/JAIL_DISK
+# in config); this tool sets per-container overrides on top of them, or
+# removes the overrides so the container falls back to the profile.
+# CPU/memory/disk changes apply to the running container immediately.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+Usage: jail-user-limits <username>                      show effective limits
+       jail-user-limits <username> [--cpu <n>] [--memory <size>] [--disk <size>]
+       jail-user-limits <username> --reset              back to profile defaults
+Sizes take incus units, e.g. 512MiB, 2GiB.
+EOF
+    exit 1
+}
+
+username="${1:-}"
+[ -n "${username}" ] || usage
+shift
+cpu="" memory="" disk="" reset=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --cpu)    cpu="${2:?--cpu needs a value}"; shift 2 ;;
+        --memory) memory="${2:?--memory needs a value}"; shift 2 ;;
+        --disk)   disk="${2:?--disk needs a value}"; shift 2 ;;
+        --reset)  reset=true; shift ;;
+        *) usage ;;
+    esac
+done
+
+need_root
+validate_username "${username}"
+jail="${JAIL_PREFIX}${username}"
+container_exists "${jail}" || die "no such jail: ${jail}"
+
+[[ -z "${cpu}"    || "${cpu}"    =~ ^[0-9]+$ ]] || die "--cpu must be a whole number of cores"
+[[ -z "${memory}" || "${memory}" =~ ^[0-9]+([KMGT]i?B)?$ ]] || die "--memory: bad size '${memory}' (e.g. 512MiB, 2GiB)"
+[[ -z "${disk}"   || "${disk}"   =~ ^[0-9]+([KMGT]i?B)?$ ]] || die "--disk: bad size '${disk}' (e.g. 10GiB)"
+
+# The root disk normally comes from the profile; a per-container size needs
+# the device copied into local config first (incus "override").
+root_is_local() { incus config device show "${jail}" | grep -q '^root:'; }
+
+if ${reset}; then
+    [ -z "${cpu}${memory}${disk}" ] || die "--reset cannot be combined with other options"
+    log "Resetting '${jail}' to profile limits"
+    incus config unset "${jail}" limits.cpu 2>/dev/null || true
+    incus config unset "${jail}" limits.memory 2>/dev/null || true
+    if root_is_local; then
+        incus config device remove "${jail}" root >/dev/null
+    fi
+elif [ -n "${cpu}${memory}${disk}" ]; then
+    [ -n "${cpu}" ]    && { log "Setting ${jail} limits.cpu=${cpu}";       incus config set "${jail}" limits.cpu "${cpu}"; }
+    [ -n "${memory}" ] && { log "Setting ${jail} limits.memory=${memory}"; incus config set "${jail}" limits.memory "${memory}"; }
+    if [ -n "${disk}" ]; then
+        log "Setting ${jail} root disk size=${disk}"
+        root_is_local || incus config device override "${jail}" root >/dev/null
+        incus config device set "${jail}" root size "${disk}"
+    fi
+fi
+
+# Effective view: expanded config merges profile and per-container values.
+expanded="$(incus config show "${jail}" --expanded)"
+get() { echo "${expanded}" | awk -v k="$1" '$1 == k":" {gsub(/"/, "", $2); print $2; exit}'; }
+overridden() { incus config get "${jail}" "$1" | grep -q . && echo " (override)" || true; }
+echo
+echo "  Container : ${jail}"
+echo "  CPU       : $(get limits.cpu)$(overridden limits.cpu)"
+echo "  Memory    : $(get limits.memory)$(overridden limits.memory)"
+disk_size="$(echo "${expanded}" | awk '/^  root:/{r=1} r && $1=="size:"{print $2; exit}')"
+disk_src="$(root_is_local && echo " (override)" || true)"
+echo "  Disk      : ${disk_size:-unlimited}${disk_src}"

@@ -1,0 +1,107 @@
+#!/bin/bash
+#
+# jail-update — check or apply OS package updates in the router and all
+# jail containers.
+#
+# Jails and the router are Ubuntu containers on every host distro, so
+# this is apt-only by design. Runs from the host; also wired to a systemd
+# timer (ssh-jails-update.timer, schedule in config) by install.sh.
+#
+# NOT covered here, by design:
+#   - the HOST's own packages and the kernel every container shares -
+#     keep the host patched with its own mechanism (unattended-upgrades
+#     on Ubuntu, dnf-automatic on EL)
+#   - sshpiperd in the router: a pinned, checksum-verified binary, not a
+#     package - bump SSHPIPER_VERSION/SSHPIPER_SHA256_* in config and
+#     re-run install.sh (see DESIGN.md)
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+Usage: jail-update [--check] [<username> | --router]
+  (no target)  update the router and every jail container
+  <username>   update one user's jail
+  --router     update only the router container
+  --check      report pending updates instead of applying them
+EOF
+    exit 1
+}
+
+check=false
+target=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) check=true; shift ;;
+        --router) target="${ROUTER_NAME}"; shift ;;
+        -*) usage ;;
+        *) [ -z "${target}" ] || usage
+           validate_username "$1"; target="${JAIL_PREFIX}$1"; shift ;;
+    esac
+done
+
+need_root
+
+if [ -n "${target}" ]; then
+    container_exists "${target}" || die "no such container: ${target}"
+    containers="${target}"
+else
+    containers="$(incus list -c n -f csv | grep -E "^${JAIL_PREFIX}" || true)"
+    container_exists "${ROUTER_NAME}" && containers="${ROUTER_NAME}
+${containers}"
+    [ -n "${containers}" ] || die "no containers found - run install.sh first"
+fi
+
+fails=0
+reboot_wanted=""
+for c in ${containers}; do
+    state="$(incus list "^${c}\$" -c s -f csv 2>/dev/null | head -1)"
+    if [ "${state}" != "RUNNING" ]; then
+        warn "${c}: not running (${state:-missing}) - skipped"
+        fails=$((fails + 1))
+        continue
+    fi
+    if ${check}; then
+        pending="$(incus exec "${c}" -- sh -c \
+            'apt-get -q update >/dev/null 2>&1; apt list --upgradable 2>/dev/null | grep -v "^Listing" | cut -d/ -f1 | tr "\n" " "' || true)"
+        n="$(echo "${pending}" | wc -w)"
+        if [ "${n}" -eq 0 ]; then
+            log "${c}: up to date"
+        else
+            log "${c}: ${n} update(s) pending: ${pending}"
+        fi
+    else
+        log "Updating ${c}"
+        if out="$(incus exec "${c}" -- bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -q update
+            apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
+            # Ensure the self-patch layer exists (adopted/old containers may lack it).
+            command -v unattended-upgrade >/dev/null 2>&1 || apt-get -yq install unattended-upgrades
+            systemctl enable unattended-upgrades >/dev/null 2>&1 || true
+            apt-get -yq autoremove --purge
+            apt-get clean
+        ' 2>&1)"; then
+            echo "${out}" | grep -m1 -E '^[0-9]+ upgraded' | sed "s/^/  ${c}: /" || echo "  ${c}: done"
+        else
+            warn "${c}: update FAILED"
+            echo "${out}" | tail -5 | sed "s/^/  ${c}: /" >&2
+            fails=$((fails + 1))
+            continue
+        fi
+        if incus exec "${c}" -- test -e /var/run/reboot-required 2>/dev/null; then
+            reboot_wanted="${reboot_wanted} ${c}"
+        fi
+    fi
+done
+
+if [ -n "${reboot_wanted}" ]; then
+    warn "these containers want a restart to fully apply updates (kills live sessions):${reboot_wanted}"
+    warn "restart with: incus restart <container>"
+fi
+if [ "${fails}" -gt 0 ]; then
+    die "${fails} container(s) skipped or failed"
+fi
+${check} || log "All containers updated"

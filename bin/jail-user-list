@@ -1,0 +1,30 @@
+#!/bin/bash
+#
+# jail-user-list — show all provisioned jail users and their containers.
+#
+# The generated sshpiper pipe files are the user registry (the router has
+# no Unix accounts).
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+need_root
+container_exists "${ROUTER_NAME}" || die "router container '${ROUTER_NAME}' missing - run install.sh first"
+
+users="$(router_exec sh -c "ls '${PIPES_DIR}' 2>/dev/null | sed -n 's/\.yaml\$//p' | grep -v '^00-placeholder\$'" || true)"
+keyonly_users="$(router_exec sh -c 'cat /etc/ssh-router/key-only-users 2>/dev/null' || true)"
+
+printf '%-22s %-26s %-10s %-16s %-5s %-5s %s\n' "USER" "CONTAINER" "STATE" "IP" "SUDO" "KEYS" "AUTH"
+for u in ${users}; do
+    jail="${JAIL_PREFIX}${u}"
+    line="$(incus list "^${jail}\$" -c s4 -f csv 2>/dev/null | head -1)"
+    state="${line%%,*}"
+    ip="$(echo "${line#*,}" | awk '{print $1}')"
+    sudo_state="no"
+    incus exec "${jail}" -- test -e "/etc/sudoers.d/90-jail-${u}" 2>/dev/null && sudo_state="yes"
+    nkeys="$(router_exec sh -c "awk 'NF && \$1 !~ /^#/ {n++} END {print n+0}' '${AUTH_KEYS_DIR}/${u}' 2>/dev/null" || echo 0)"
+    auth="password"
+    grep -qx "${u}" <<< "${keyonly_users}" && auth="key-only"
+    printf '%-22s %-26s %-10s %-16s %-5s %-5s %s\n' "${u}" "${jail}" "${state:-MISSING}" "${ip:--}" "${sudo_state}" "${nkeys:-0}" "${auth}"
+done

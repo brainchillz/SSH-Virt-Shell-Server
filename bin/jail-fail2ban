@@ -1,0 +1,94 @@
+#!/bin/bash
+#
+# jail-fail2ban — manage the fail2ban instance inside the router container.
+#
+# fail2ban watches sshpiperd's journal (failtoban --log-only WARN lines,
+# custom filter installed by install.sh) and bans source IPs with
+# repeated auth failures (tunables F2B_* in config/ssh-router.conf, applied
+# by install.sh). The whitelist maps to fail2ban's ignoreip: listed
+# addresses are never banned. install.sh seeds it with localhost and the
+# host's bridge address (so admin logins and the e2e test can't ban the
+# host itself); entries added here are kept across re-installs.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+Usage: jail-fail2ban status                   jail status incl. currently banned IPs
+       jail-fail2ban unban <ip>               lift a ban now
+       jail-fail2ban whitelist                list never-ban addresses
+       jail-fail2ban whitelist add <ip[/n]>
+       jail-fail2ban whitelist remove <ip[/n]>
+EOF
+    exit 1
+}
+
+WHITELIST_FILE="/etc/fail2ban/jail.d/90-ssh-router-whitelist.conf"
+
+need_root
+container_exists "${ROUTER_NAME}" || die "router container '${ROUTER_NAME}' missing - run install.sh first"
+router_exec sh -c 'command -v fail2ban-client >/dev/null 2>&1 || exit 1' 2>/dev/null || \
+    die "fail2ban is not installed in the router - re-run install.sh"
+
+current_whitelist() {
+    router_exec sh -c "grep -E '^ignoreip' '${WHITELIST_FILE}' 2>/dev/null | cut -d= -f2-" | xargs -n1 2>/dev/null || true
+}
+
+write_whitelist() { # entries on stdin, one per line
+    local entries
+    entries="$(xargs 2>/dev/null || true)"
+    router_exec sh -c "cat > '${WHITELIST_FILE}' <<EOF
+# Managed by jail-fail2ban - do not edit (use: jail-fail2ban whitelist ...)
+[sshpiperd]
+ignoreip = ${entries}
+EOF"
+    router_exec fail2ban-client reload sshpiperd >/dev/null 2>&1
+}
+
+case "${1:-}" in
+status)
+    router_exec fail2ban-client status sshpiperd
+    ;;
+
+unban)
+    ip="${2:-}"
+    [ -n "${ip}" ] || usage
+    validate_ip_or_cidr "${ip}"
+    router_exec fail2ban-client set sshpiperd unbanip "${ip}" >/dev/null && log "Unbanned ${ip}" || \
+        die "could not unban ${ip} (was it banned? see: jail-fail2ban status)"
+    ;;
+
+whitelist)
+    sub="${2:-list}"
+    case "${sub}" in
+    list)
+        echo "Never-banned addresses (fail2ban ignoreip):"
+        current_whitelist | sed 's/^/  /'
+        ;;
+    add)
+        ip="${3:-}"
+        [ -n "${ip}" ] || usage
+        validate_ip_or_cidr "${ip}"
+        if current_whitelist | grep -qxF "${ip}"; then
+            log "${ip} is already whitelisted"
+        else
+            { current_whitelist; echo "${ip}"; } | write_whitelist
+            log "Whitelisted ${ip} - it will never be banned"
+        fi
+        ;;
+    remove)
+        ip="${3:-}"
+        [ -n "${ip}" ] || usage
+        validate_ip_or_cidr "${ip}"
+        current_whitelist | grep -qxF "${ip}" || die "${ip} is not in the whitelist"
+        current_whitelist | grep -vxF "${ip}" | write_whitelist
+        log "Removed ${ip} from the whitelist"
+        ;;
+    *) usage ;;
+    esac
+    ;;
+
+*) usage ;;
+esac

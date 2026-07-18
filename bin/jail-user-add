@@ -1,0 +1,65 @@
+#!/bin/bash
+#
+# jail-user-add — provision a new jailed SSH user.
+#
+# Creates the user's jail container from the golden base image, sets their
+# password INSIDE the jail (sshpiper forwards the login password there for
+# validation - users can change it later with plain 'passwd'), installs a
+# dedicated ed25519 hop keypair, pins the jail's SSH host key, and
+# generates the user's sshpiper pipe. No account of any kind is created on
+# the router.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() { echo "Usage: jail-user-add <username> [--password <password>] [--sudo]" >&2; exit 1; }
+
+username="${1:-}"
+[ -n "${username}" ] || usage
+shift
+password=""
+grant_sudo=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --password) password="${2:?--password needs a value}"; shift 2 ;;
+        --sudo) grant_sudo=true; shift ;;
+        *) usage ;;
+    esac
+done
+
+need_root
+validate_username "${username}"
+jail="${JAIL_PREFIX}${username}"
+
+container_exists "${ROUTER_NAME}" || die "router container '${ROUTER_NAME}' missing - run install.sh first"
+container_exists "${jail}" && die "container '${jail}' already exists"
+user_exists "${username}" && die "user '${username}' already has a pipe on the router"
+
+[ -n "${password}" ] || password="$(gen_password)"
+
+log "Launching jail container '${jail}'"
+incus launch "${BASE_IMAGE_ALIAS}" "${jail}" --profile "${JAIL_PROFILE}" >/dev/null
+wait_for_container "${jail}"
+
+log "Creating user '${username}' inside the jail"
+incus exec "${jail}" -- useradd -m -s /bin/bash "${username}"
+printf '%s:%s\n' "${username}" "${password}" | incus exec "${jail}" -- chpasswd
+if ${grant_sudo}; then
+    "${BASE_DIR}/bin/jail-user-sudo" "${username}" on --already-validated
+fi
+
+log "Installing hop keypair (private on router, public in jail)"
+install_hop_key "${username}" "${jail}"
+
+log "Pinning jail host key on the router"
+pin_jail_hostkey "${username}" "${jail}"
+
+log "Generating sshpiper pipe"
+regen_pipe "${username}"
+
+log "User '${username}' provisioned"
+echo
+echo "  Login    : ssh -p ${ROUTER_SSH_PORT} ${username}@<this-host>"
+echo "  Password : ${password}"
+echo "  Container: ${jail} ($(jail_ip "${jail}"))"

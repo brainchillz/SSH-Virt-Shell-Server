@@ -1,0 +1,51 @@
+#!/bin/bash
+#
+# jail-user-del — remove a jailed SSH user and all their state.
+#
+# Removes the user's pipe (which immediately stops new logins - the yaml
+# plugin re-reads config per connection), hop key, login keys, pinned
+# host key and key-only entry from the router, then deletes the jail
+# container (including its data!). There are no router processes or
+# accounts to clean up; live relay sessions die with the container.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() { echo "Usage: jail-user-del <username> [--yes]" >&2; exit 1; }
+
+username="${1:-}"
+[ -n "${username}" ] || usage
+shift
+confirmed=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes|-y) confirmed=true; shift ;;
+        *) usage ;;
+    esac
+done
+
+need_root
+validate_username "${username}"
+jail="${JAIL_PREFIX}${username}"
+
+if ! ${confirmed}; then
+    read -r -p "Delete user '${username}' and container '${jail}' INCLUDING ALL DATA? [y/N] " answer
+    [[ "${answer}" =~ ^[Yy] ]] || die "aborted"
+fi
+
+if container_exists "${ROUTER_NAME}"; then
+    log "Removing router state for '${username}'"
+    router_exec rm -f "${PIPES_DIR}/${username}.yaml" "${KEYS_DIR}/${username}" \
+        "${AUTH_KEYS_DIR}/${username}" "${KNOWN_HOSTS_DIR}/${username}"
+    router_exec sh -c "sed -i '/^${username}\$/d' /etc/ssh-router/key-only-users 2>/dev/null" || true
+fi
+
+if container_exists "${jail}"; then
+    log "Deleting container '${jail}'"
+    incus delete -f "${jail}"
+else
+    warn "container '${jail}' not found"
+fi
+
+log "User '${username}' removed"

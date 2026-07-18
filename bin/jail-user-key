@@ -1,0 +1,167 @@
+#!/bin/bash
+#
+# jail-user-key — manage a user's public keys for router login, and the
+# per-user key-only mode.
+#
+# Keys live on the router in AUTH_KEYS_DIR/<user> (root-owned, so users
+# cannot grant themselves access). Every change regenerates the user's
+# sshpiper pipe: with keys installed the pipe gains a pubkey route
+# (upstream auth via the hop key); key-only mode simply drops the
+# password-passthrough route from the pipe. The yaml plugin re-reads
+# config per connection, so changes apply to the next login immediately.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() {
+    cat >&2 <<EOF
+Usage: jail-user-key list <username>
+       jail-user-key add <username> [<pubkey-file>]     (no file: read stdin)
+       jail-user-key remove <username> <index|all>
+       jail-user-key key-only <username> <on|off>
+EOF
+    exit 1
+}
+
+action="${1:-}"
+username="${2:-}"
+[ -n "${username}" ] || usage
+
+# Capture piped key material BEFORE any incus call: incus exec attaches
+# and drains stdin, so a later 'cat' would find it empty.
+stdin_keys=""
+if [ "${action}" = "add" ] && [ -z "${3:-}" ] && [ ! -t 0 ]; then
+    stdin_keys="$(cat)"
+fi
+
+need_root
+validate_username "${username}"
+container_exists "${ROUTER_NAME}" || die "router container '${ROUTER_NAME}' missing - run install.sh first"
+user_exists "${username}" || die "no such jail user: ${username}"
+
+keyfile_router="${ROUTER_NAME}${AUTH_KEYS_DIR}/${username}"
+keyonly_list="/etc/ssh-router/key-only-users"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
+keys="${tmp}/keys"
+
+pull_keys() {
+    incus file pull -q "${keyfile_router}" "${keys}" 2>/dev/null || : > "${keys}"
+    # normalize: strip blank and comment lines
+    grep -vE '^[[:space:]]*(#|$)' "${keys}" > "${keys}.n" 2>/dev/null || : > "${keys}.n"
+    mv "${keys}.n" "${keys}"
+}
+
+push_keys() {
+    router_exec install -d -m 755 "${AUTH_KEYS_DIR}"
+    if [ -s "${keys}" ]; then
+        incus file push -q --mode 644 --uid 0 --gid 0 "${keys}" "${keyfile_router}"
+    else
+        # regen_pipe keys presence check uses -s, but remove the file
+        # outright so list/count tooling sees a clean state.
+        router_exec rm -f "${AUTH_KEYS_DIR}/${username}"
+    fi
+    regen_pipe "${username}"
+}
+
+is_keyonly() { router_exec grep -qx "${username}" "${keyonly_list}" 2>/dev/null; }
+
+print_keys() {
+    if [ ! -s "${keys}" ]; then
+        echo "  (no keys installed)"
+        return
+    fi
+    local i=0 line
+    while IFS= read -r line; do
+        i=$((i + 1))
+        printf '  %2d  %s\n' "${i}" \
+            "$(printf '%s\n' "${line}" | ssh-keygen -lf /dev/stdin 2>/dev/null || echo '(unparseable key line)')"
+    done < "${keys}"
+}
+
+case "${action}" in
+list)
+    pull_keys
+    echo "Router login keys for '${username}':"
+    print_keys
+    if is_keyonly; then echo "  Auth: key-only (password disabled)"; else echo "  Auth: password + keys"; fi
+    ;;
+
+add)
+    src="${3:-}"
+    if [ -n "${src}" ]; then
+        [ -r "${src}" ] || die "cannot read '${src}'"
+        cp "${src}" "${tmp}/new"
+    elif [ -n "${stdin_keys}" ]; then
+        printf '%s\n' "${stdin_keys}" > "${tmp}/new"
+    else
+        [ -t 0 ] && echo "Paste public key(s), then Ctrl-D:" >&2
+        cat > "${tmp}/new"
+    fi
+    pull_keys
+    added=0
+    while IFS= read -r line; do
+        case "${line}" in ''|\#*) continue ;; esac
+        printf '%s\n' "${line}" | ssh-keygen -lf /dev/stdin >/dev/null 2>&1 || \
+            die "not a valid SSH public key: ${line:0:60}..."
+        if grep -qxF "${line}" "${keys}"; then
+            warn "key already installed, skipping: $(printf '%s\n' "${line}" | ssh-keygen -lf /dev/stdin | awk '{print $2}')"
+            continue
+        fi
+        printf '%s\n' "${line}" >> "${keys}"
+        added=$((added + 1))
+    done < "${tmp}/new"
+    [ "${added}" -gt 0 ] || die "no new keys to add"
+    push_keys
+    log "Added ${added} key(s) for '${username}'"
+    print_keys
+    ;;
+
+remove)
+    which="${3:-}"
+    [ -n "${which}" ] || usage
+    pull_keys
+    [ -s "${keys}" ] || die "'${username}' has no keys installed"
+    total="$(wc -l < "${keys}")"
+    if [ "${which}" = "all" ]; then
+        remaining=0
+    else
+        [[ "${which}" =~ ^[0-9]+$ ]] && [ "${which}" -ge 1 ] && [ "${which}" -le "${total}" ] || \
+            die "index must be 1..${total} or 'all'"
+        remaining=$((total - 1))
+    fi
+    if [ "${remaining}" -eq 0 ] && is_keyonly; then
+        die "'${username}' is key-only; removing the last key would lock them out (run 'jail-user-key key-only ${username} off' first)"
+    fi
+    if [ "${which}" = "all" ]; then
+        : > "${keys}"
+    else
+        sed -i "${which}d" "${keys}"
+    fi
+    push_keys
+    log "Removed $((total - remaining)) key(s) for '${username}' (${remaining} left)"
+    ;;
+
+key-only)
+    mode="${3:-}"
+    case "${mode}" in
+    on)
+        pull_keys
+        [ -s "${keys}" ] || die "cannot enable key-only: '${username}' has no keys installed"
+        router_exec sh -c "touch '${keyonly_list}' && grep -qx '${username}' '${keyonly_list}' || echo '${username}' >> '${keyonly_list}'"
+        regen_pipe "${username}"
+        log "Password auth disabled for '${username}' (key-only)"
+        ;;
+    off)
+        router_exec sh -c "sed -i '/^${username}\$/d' '${keyonly_list}' 2>/dev/null" || true
+        regen_pipe "${username}"
+        log "Password auth re-enabled for '${username}'"
+        ;;
+    *) usage ;;
+    esac
+    ;;
+
+*) usage ;;
+esac

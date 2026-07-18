@@ -1,0 +1,43 @@
+#!/bin/bash
+#
+# jail-user-sudo — grant or revoke passwordless sudo INSIDE a user's own
+# jail container. Root in an unprivileged, idmap-isolated jail maps to a
+# meaningless UID range on the host, so this stays contained; the jail
+# NIC's mac/ipv4 filtering keeps container-root from spoofing on the
+# bridge.
+
+set -euo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+usage() { echo "Usage: jail-user-sudo <username> <on|off>" >&2; exit 1; }
+
+username="${1:-}"
+mode="${2:-}"
+[ -n "${username}" ] || usage
+case "${mode}" in on|off) ;; *) usage ;; esac
+
+need_root
+# --already-validated: internal fast path used by jail-user-add mid-provision.
+if [ "${3:-}" != "--already-validated" ]; then
+    validate_username "${username}"
+    container_exists "${JAIL_PREFIX}${username}" || die "no such jail: ${JAIL_PREFIX}${username}"
+    incus exec "${JAIL_PREFIX}${username}" -- id -u "${username}" >/dev/null 2>&1 || \
+        die "user '${username}' does not exist in the jail"
+fi
+jail="${JAIL_PREFIX}${username}"
+sudoers_file="/etc/sudoers.d/90-jail-${username}"
+
+if [ "${mode}" = "on" ]; then
+    log "Granting passwordless sudo to '${username}' inside ${jail}"
+    # Old base images may not have sudo; install it on demand.
+    incus exec "${jail}" -- sh -c 'command -v sudo >/dev/null 2>&1 || {
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get -q update >/dev/null && apt-get -yq install sudo >/dev/null
+    }'
+    incus exec "${jail}" -- sh -c \
+        "printf '%s ALL=(ALL) NOPASSWD:ALL\n' '${username}' > '${sudoers_file}' && chmod 440 '${sudoers_file}'"
+else
+    log "Revoking sudo from '${username}' inside ${jail}"
+    incus exec "${jail}" -- rm -f "${sudoers_file}"
+fi
