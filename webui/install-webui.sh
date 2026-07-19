@@ -188,7 +188,19 @@ if ${with_portal}; then
     install -m 640 -o root -g "${PORTAL_USER}" \
         "${REPO_DIR}/webui/ssh-jails-portal.py" "${WEBUI_DIR}/"
     chgrp "${PORTAL_USER}" "${WEBUI_DIR}" && chmod 750 "${WEBUI_DIR}"
-    if [ ! -f "${WEBUI_DIR}/portal-cert.pem" ]; then
+    # Custom cert (WEBUI_PORTAL_CERT/KEY) or a generated self-signed pair.
+    # The unprivileged portal reads its cert/key from inside the webui dir,
+    # so a custom pair is copied in (group-readable by the portal user);
+    # after renewing the source files, re-run this installer.
+    : "${WEBUI_PORTAL_CERT:=}"; : "${WEBUI_PORTAL_KEY:=}"
+    if [ -n "${WEBUI_PORTAL_CERT}" ] || [ -n "${WEBUI_PORTAL_KEY}" ]; then
+        [ -r "${WEBUI_PORTAL_CERT}" ] || die "WEBUI_PORTAL_CERT '${WEBUI_PORTAL_CERT}' is not readable"
+        [ -r "${WEBUI_PORTAL_KEY}" ]  || die "WEBUI_PORTAL_KEY '${WEBUI_PORTAL_KEY}' is not readable"
+        log "Using custom portal TLS certificate: ${WEBUI_PORTAL_CERT}"
+        install -m 644 "${WEBUI_PORTAL_CERT}" "${WEBUI_DIR}/portal-cert.pem"
+        install -m 640 "${WEBUI_PORTAL_KEY}"  "${WEBUI_DIR}/portal-key.pem"
+    elif [ ! -f "${WEBUI_DIR}/portal-cert.pem" ]; then
+        log "Generating self-signed portal TLS certificate"
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
             -subj "/CN=ssh-jails-portal" \
             -keyout "${WEBUI_DIR}/portal-key.pem" -out "${WEBUI_DIR}/portal-cert.pem" 2>/dev/null

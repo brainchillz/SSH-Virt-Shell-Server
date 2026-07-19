@@ -48,6 +48,10 @@ add_conf SSHPIPER_VERSION "${SSHPIPER_VERSION}" "Pinned sshpiperd release (see D
 add_conf SSHPIPER_SHA256_X86_64 "${SSHPIPER_SHA256_X86_64}" "sha256 of the linux_x86_64 release bundle."
 add_conf SSHPIPER_SHA256_AARCH64 "${SSHPIPER_SHA256_AARCH64}" "sha256 of the linux_arm64 release bundle."
 add_conf UPDATE_SCHEDULE "${UPDATE_SCHEDULE}" "systemd OnCalendar for auto container updates (empty disables)."
+add_conf WEBUI_ALLOW "${WEBUI_ALLOW}" "Admin-panel IP allowlist (space/comma IPs or CIDRs; empty = any)."
+add_conf WEBUI_PORTAL_PORT "${WEBUI_PORTAL_PORT}" "HTTPS port for the self-service portal (install-webui.sh --with-portal)."
+add_conf WEBUI_PORTAL_CERT "${WEBUI_PORTAL_CERT}" "Custom TLS cert for the portal (empty = self-signed)."
+add_conf WEBUI_PORTAL_KEY "${WEBUI_PORTAL_KEY}" "Custom TLS key for the portal (empty = self-signed)."
 for tool in jail-user-add jail-user-del jail-user-list jail-user-passwd jail-user-sudo \
             jail-user-limits jail-user-key jail-user-backup jail-fail2ban jail-update \
             jail-user-auth; do

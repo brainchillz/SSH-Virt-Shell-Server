@@ -81,19 +81,50 @@ Set in `../config/ssh-router.conf`, then re-run `install-webui.sh`:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `WEBUI_BIND` | `0.0.0.0` | Bind address (use `127.0.0.1` behind a reverse proxy) |
-| `WEBUI_PORT` | `8443` | HTTPS port |
-| `WEBUI_CERT` / `WEBUI_KEY` | *(empty)* | Custom TLS certificate/key paths |
+| `WEBUI_PORT` | `8443` | Admin panel HTTPS port |
+| `WEBUI_ALLOW` | *(empty)* | Admin-IP allowlist (space/comma IPs or CIDRs); empty = any |
+| `WEBUI_CERT` / `WEBUI_KEY` | *(empty)* | Admin panel custom TLS cert/key paths |
+| `WEBUI_PORTAL_PORT` | `8444` | Self-service portal HTTPS port |
+| `WEBUI_PORTAL_CERT` / `WEBUI_PORTAL_KEY` | *(empty)* | Portal custom TLS cert/key paths |
 
-## TLS
+## TLS / changing the certificates
 
-HTTPS is always on. By default the installer generates a self-signed
-certificate (10-year, stored as `cert.pem`/`key.pem` in
-`/opt/ssh-router/webui/`), so browsers show a warning until you accept it.
+HTTPS is always on for both interfaces, each with its own certificate.
+By default the installer generates a self-signed pair (10-year) in
+`/opt/ssh-router/webui/`:
 
-To use a real certificate, point `WEBUI_CERT` and `WEBUI_KEY` at your
-fullchain/key files and re-run `install-webui.sh`. To go back to
-self-signed, empty the two variables and re-run. (After renewing a cert at
-the same paths, `systemctl restart ssh-jails-webui` is enough.)
+- **Admin panel** → `cert.pem` / `key.pem`
+- **Self-service portal** → `portal-cert.pem` / `portal-key.pem`
+
+so browsers show a warning until you accept it.
+
+**To use your own certificate:** set the matching pair of variables in
+`../config/ssh-router.conf` and re-run the installer:
+
+```sh
+# Admin panel
+WEBUI_CERT=/path/fullchain.pem   WEBUI_KEY=/path/privkey.pem
+sudo ./install-webui.sh
+
+# Self-service portal (only if you installed it)
+WEBUI_PORTAL_CERT=/path/fullchain.pem   WEBUI_PORTAL_KEY=/path/privkey.pem
+sudo ./install-webui.sh --with-portal
+```
+
+Both live on the same host, so one certificate whose SANs cover the
+hostname works for both. To go back to self-signed, empty the variables
+and re-run.
+
+**On renewal, the two differ** because of privilege:
+
+- The **admin panel** runs as root and reads `WEBUI_CERT`/`WEBUI_KEY`
+  *directly at their paths*, so after renewing at the same paths a
+  `sudo systemctl restart ssh-jails-webui` is enough.
+- The **portal** runs unprivileged, so a custom cert/key is **copied**
+  into `/opt/ssh-router/webui/` (readable by the portal user) at install
+  time. After renewing the source files you must **re-run
+  `sudo ./install-webui.sh --with-portal`** (a restart alone won't pick up
+  the new file); then it restarts `ssh-jails-portal` for you.
 
 ## Security model
 
