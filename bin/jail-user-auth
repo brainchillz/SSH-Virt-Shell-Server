@@ -1,0 +1,38 @@
+#!/bin/bash
+#
+# jail-user-auth <username> — verify an end user's password.
+#
+# Reads the password on stdin and checks it by attempting a password SSH
+# login to the user's own jail (the jail's sshd is the authority, so this
+# works regardless of host distro or password-hash scheme, and matches the
+# exact credential the user logs in with). Exit 0 = valid, non-zero = not.
+#
+# Used by the self-service portal, which runs UNPRIVILEGED and invokes this
+# via a narrowly-scoped sudo rule. It never prints the password and only
+# ever signals success through its exit code.
+
+set -uo pipefail
+BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+source "${BASE_DIR}/lib/common.sh"
+
+username="${1:-}"
+[ -n "${username}" ] || { echo "usage: jail-user-auth <username>" >&2; exit 2; }
+
+need_root
+validate_username "${username}"
+command -v sshpass >/dev/null 2>&1 || { echo "sshpass required" >&2; exit 2; }
+
+jail="${JAIL_PREFIX}${username}"
+container_exists "${jail}" || exit 1
+ip="$(jail_ip "${jail}")"
+[ -n "${ip}" ] || exit 1
+
+password="$(cat)"
+[ -n "${password}" ] || exit 1
+
+sshpass -p "${password}" ssh \
+    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=8 -o NumberOfPasswordPrompts=1 \
+    "${username}@${ip}" true >/dev/null 2>&1
+exit $?

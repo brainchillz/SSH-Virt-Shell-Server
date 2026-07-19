@@ -49,7 +49,8 @@ add_conf SSHPIPER_SHA256_X86_64 "${SSHPIPER_SHA256_X86_64}" "sha256 of the linux
 add_conf SSHPIPER_SHA256_AARCH64 "${SSHPIPER_SHA256_AARCH64}" "sha256 of the linux_arm64 release bundle."
 add_conf UPDATE_SCHEDULE "${UPDATE_SCHEDULE}" "systemd OnCalendar for auto container updates (empty disables)."
 for tool in jail-user-add jail-user-del jail-user-list jail-user-passwd jail-user-sudo \
-            jail-user-limits jail-user-key jail-user-backup jail-fail2ban jail-update; do
+            jail-user-limits jail-user-key jail-user-backup jail-fail2ban jail-update \
+            jail-user-auth; do
     ln -sf "${INSTALL_DIR}/bin/${tool}" "/usr/local/sbin/${tool}"
 done
 

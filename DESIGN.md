@@ -107,24 +107,28 @@ Internet ─► host:22 (incus NAT proxy) ─► router container
 
 ## Validation status (2026-07-18)
 
-Implemented; **e2e passes on a real Ubuntu 24.04 host (btrfs)**.
-Earlier nested validation: 38/44. The
-6 not passing are the `jail-user-backup import` trio + the reboot trio
-that reuses the imported jail — all blocked by the nested + `dir`-pool
-idmap-ACL-remap limitation of that environment, NOT a code fault. The
-exact failing operation (isolated-idmap export → re-import forcing a new
-base) was reproduced on a real **btrfs** pool and works
-(container starts, data intact) — and subsequently the full suite
-passed on a real btrfs host. EL (Rocky 9/10) validation still pending.
+**Validated 47/47 on all three supported platforms:**
 
-Nested testing earned its keep: it caught that the yaml plugin enforces
-config-file perms across the whole glob and rejected every login until
-`--no-check-perm` was added.
+| Host | Storage | SELinux | incus | Result |
+|------|---------|---------|-------|--------|
+| Ubuntu 24.04 | btrfs | — | 6.0 | 47/47 |
+| Rocky 9.8 | LVM thin | Enforcing | 6.8 | 47/47 |
+| Rocky 10.1 | LVM thin | Enforcing | 6.0.5 | 47/47 |
+
+The import/reboot checks (the six that fail on a nested `dir` pool) pass
+on btrfs and LVM alike, confirming that failure was purely the nested +
+`dir` idmap-ACL-remap limitation, not a code fault. SELinux enforcing
+needed zero policy work for the sshpiperd router (as it did for the
+parent's sshd router). Earlier nested Ubuntu run: 38/44, expected.
+
+Nested testing earned its keep anyway: it caught that the yaml plugin
+enforces config-file perms across the whole glob and rejected every
+login until `--no-check-perm` was added.
 
 ## Implementation checklist
 
-All items landed (see git history for the conversion commit):
-config pins, regen_pipe/common.sh rework, install.sh sshpiperd router,
-password-auth base image, reworked bin/ scripts, sshpiperd fail2ban
-jail+filter, zero-footprint e2e assertions, docs. Remaining:
-- [ ] EL validation on Rocky 9/10 (VMs currently carry the parent)
+All items landed and validated on all platforms: config pins,
+regen_pipe/common.sh rework, install.sh sshpiperd router, password-auth
+base image, reworked bin/ scripts, sshpiperd fail2ban jail+filter,
+zero-footprint e2e assertions, container-update tooling, docs. No open
+items — the parent's last remaining advantage (EL coverage) is closed.

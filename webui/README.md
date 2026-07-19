@@ -1,20 +1,35 @@
 # SSH-Virt-Shell-Server Web UI (optional addon)
 
-A small HTTPS admin panel for provisioning jail users from a browser.
-Entirely optional: the core system works identically without it, and it can
-be added or removed at any time without touching the router or the jails.
+Two optional HTTPS interfaces, both zero-dependency stdlib-only Python that
+shell out to the same `/opt/ssh-router/bin` scripts the CLI uses (one code
+path, no divergence). Entirely optional — the core system works identically
+without either, and both add/remove cleanly without touching the router or
+jails:
 
-It is deliberately boring: a single zero-dependency Python (stdlib-only)
-process that shells out to the same `/opt/ssh-router/bin` management
-scripts the CLI uses — one code path for all provisioning, no divergence.
+- **Admin panel** (`ssh-jails-webui`, port 8443) — provision and manage all
+  users. Runs as root. Hardened: username+password login (generic error, no
+  username enumeration), per-IP lockout, optional IP allowlist, opt-in TOTP
+  2FA.
+- **Self-service portal** (`ssh-jails-portal`, port 8444, optional
+  `--with-portal`) — end users sign in with their SSH credentials to change
+  their own password and manage their own login keys. Runs **unprivileged**
+  (user `ssh-jails-web`) and can only ever touch the signed-in user's own
+  account, via a narrow sudo rule.
 
 ## Install / update / remove
 
 ```sh
-sudo ./install-webui.sh                          # install or update (idempotent)
+sudo ./install-webui.sh                          # admin panel: install/update (idempotent)
+sudo ./install-webui.sh --with-portal            # also install the self-service portal
+sudo ./install-webui.sh --admin-user 'name'      # set/rename the admin username
 sudo ./install-webui.sh --admin-password 'Pw…'   # also set the admin password
-sudo ./install-webui.sh --uninstall              # remove completely (core untouched)
+sudo ./install-webui.sh --uninstall              # remove everything (core untouched)
 ```
+
+Admins can also rename the account, change the password, and enable/disable
+TOTP 2FA from the panel's **Account** view. The IP allowlist is set via
+`WEBUI_ALLOW` in `../config/ssh-router.conf` (empty by default — the panel
+stays remotely reachable).
 
 The installer refuses to start if the configured port is already held by
 another process (change `WEBUI_PORT` and re-run).
@@ -36,8 +51,25 @@ boot, auto-restarts on failure).
   login keys incl. key-only mode, and backups (snapshot,
   restore behind a confirmation page, delete, export to tarball;
   `import` stays CLI-only since it takes a host-side file)
-- fail2ban panel: currently banned IPs with one-click unban, and the
+- fail2ban view: currently banned IPs with one-click unban, and the
   never-ban whitelist
+- Account view: rename the admin, change its password, enable/disable 2FA
+
+## Self-service portal (`--with-portal`)
+
+A separate, unprivileged service on port 8444 (`WEBUI_PORTAL_PORT`). End
+users log in with the same username + password they SSH with (validated
+against their own jail) and can:
+
+- change their own password
+- add / remove their own login public keys
+- switch their account between password and key-only login
+
+It never runs as root: it authenticates via `jail-user-auth` and performs
+the two self-service operations through a sudo rule limited to exactly
+`jail-user-auth`, `jail-user-passwd`, and `jail-user-key`. Every action
+targets the logged-in user's own account only. The admin panel's
+credentials remain unreadable to the portal.
 
 Provisioning a user launches a container, so the "Create" action takes
 ~30–60 seconds; the page waits for it.

@@ -85,6 +85,7 @@ Internet ──► host:22 ──► ssh-router container (sshpiperd relay, no a
 | `bin/jail-user-backup` | Snapshots and portable export/import per jail |
 | `bin/jail-fail2ban` | fail2ban status, unban, and the never-ban whitelist |
 | `bin/jail-update` | Apply/check OS package updates across router + all jails |
+| `bin/jail-user-auth` | Verify a user's password via their jail (used by the self-service portal) |
 | `config/ssh-router.conf` | All tunables (names, ports, limits, pinned sshpiperd version) |
 | `test/e2e-test.sh` | End-to-end test: routing, isolation, zero-footprint router, keys, fail2ban (incl. a real ban), backups, simulated reboot |
 | `webui/` | **Optional** web admin panel — see [webui/README.md](webui/README.md) |
@@ -193,10 +194,20 @@ host's real address, even from the host itself.
 
 ## Web interface (optional)
 
-An optional HTTPS admin panel for provisioning users from a browser lives
-in [`webui/`](webui/README.md). It wraps the same `bin/` scripts, installs
-with `sudo webui/install-webui.sh`, and removes cleanly with
-`--uninstall` — the core system never depends on it. Besides user
-provisioning it covers everything above: per-user limits, login keys and
-key-only mode, snapshots/restore/export, and a fail2ban panel with
-one-click unban and whitelist management.
+Two optional HTTPS interfaces live in [`webui/`](webui/README.md), both
+wrapping the same `bin/` scripts. The core system never depends on either
+(everything is doable from the CLI), and both remove cleanly with
+`--uninstall`.
+
+- **Admin panel** (`sudo webui/install-webui.sh`, port 8443) — provision and
+  manage all users: add/delete, per-user limits, login keys and key-only
+  mode, snapshots/restore/export, and a fail2ban view. Runs as root, and is
+  hardened: username+password login, per-IP lockout, an optional IP
+  allowlist (`WEBUI_ALLOW`, empty by default so it stays remotely
+  reachable), and opt-in TOTP two-factor auth. The admin username and
+  password are set from the Account view or `--admin-user` / `--admin-password`.
+- **Self-service portal** (`sudo webui/install-webui.sh --with-portal`, port
+  8444) — end users sign in with the same username + password they SSH with
+  and manage their **own** password and login keys. Runs **unprivileged**
+  and can only ever touch the signed-in user's account, via a narrow sudo
+  rule (see [`webui/README.md`](webui/README.md)).

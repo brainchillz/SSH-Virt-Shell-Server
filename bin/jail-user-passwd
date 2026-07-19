@@ -10,15 +10,19 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 source "${BASE_DIR}/lib/common.sh"
 
-usage() { echo "Usage: jail-user-passwd <username> [--password <password>]" >&2; exit 1; }
+usage() { echo "Usage: jail-user-passwd <username> [--password <password> | --password-stdin]" >&2; exit 1; }
 
 username="${1:-}"
 [ -n "${username}" ] || usage
 shift
 password=""
+generated=true
 while [ $# -gt 0 ]; do
     case "$1" in
-        --password) password="${2:?--password needs a value}"; shift 2 ;;
+        --password) password="${2:?--password needs a value}"; generated=false; shift 2 ;;
+        # Read the new password from stdin so it never appears on the argv
+        # (used by the self-service portal for a user-chosen password).
+        --password-stdin) password="$(cat)"; generated=false; shift ;;
         *) usage ;;
     esac
 done
@@ -29,8 +33,16 @@ jail="${JAIL_PREFIX}${username}"
 container_exists "${jail}" || die "no such jail: ${jail}"
 incus exec "${jail}" -- id -u "${username}" >/dev/null 2>&1 || die "no such user in ${jail}: ${username}"
 
-[ -n "${password}" ] || password="$(gen_password)"
+if [ -z "${password}" ]; then
+    ${generated} || die "empty password"
+    password="$(gen_password)"
+fi
 printf '%s:%s\n' "${username}" "${password}" | incus exec "${jail}" -- chpasswd
 
 log "Password updated for '${username}'"
-echo "  New password: ${password}"
+# Only reveal a password we generated; a user/admin-chosen one is already
+# known. (Must be an `if`, not `${generated} && echo`, or a false value
+# would make the script exit non-zero on a user-chosen password.)
+if ${generated}; then
+    echo "  New password: ${password}"
+fi
